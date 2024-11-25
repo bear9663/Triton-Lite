@@ -1,12 +1,11 @@
 /**
  *
  * 20240729:圧力センサの値を求めるプログラムがおかしかったため修正
- *
- *
+ *20241124:OneWireendを追加し、GPSの取得失敗するのを修正
  * @file TritonLite_main.ino * 
- * @brief Triton-Lite用のプログラム（GPS時刻同期機能付き、UIでの浮沈時間調節）
- * @author Ryusei Kamiyama , Shintaro Matsumoto,Komatsu Takuma
- * @date 2024/11/23
+ * @brief Triton-Lite用のプログラム
+ * @author Komatsu Takuma
+ * @date 2024/1/25
  */
 
 //============================================================
@@ -45,18 +44,11 @@ struct SystemConfig {
 
 //============================================================
 // 各種設定
-// 電磁弁開閉時間指定（互換性のため残す）
+// 電磁弁開閉時間指定
 #define SUP_START_TIME (config.sup_start_time)
 #define SUP_STOP_TIME (config.sup_stop_time)
 #define EXH_START_TIME (config.exh_start_time)
 #define EXH_STOP_TIME (config.exh_stop_time)
-
-// 時刻同期関連
-const unsigned long TIME_SYNC_INTERVAL = 3600000;  // 同期間隔（1時間）
-const unsigned long TIME_PRINT_INTERVAL = 1000;    // 表示間隔（1秒）
-bool gpsTimeSet = false;  // GPS時刻が設定されたかどうかのフラグ
-unsigned long lastTimeSync = 0;  // 最後に同期した時刻
-unsigned long lastTimePrint = 0;  // 最後に時刻を表示した時刻
 
 //SDカードシールド
 const int chipSelect = 10;
@@ -68,8 +60,6 @@ TinyGPSPlus gps;
 //温度センサ
 #define ONE_WIRE_BUS 4
 #define SENSOR_BIT 8
-OneWire oneWire(ONE_WIRE_BUS);
-DallasTemperature sensors(&oneWire);
 
 //水圧センサ
 MS5837 DepthSensor;
@@ -133,232 +123,16 @@ int8_t state;
 // 状態(上昇=1,下降=2,加圧=3)
 
 //============================================================
-// 時刻管理関連の関数
+// 関数定義
 
-// RTCの現在時刻を表示
-void printCurrentTime() {
-  tmElements_t tm = rtc.read();
-  char timeStr[30];
-  sprintf(timeStr, "RTC Time: %04d/%02d/%02d %02d:%02d:%02d", 
-          tmYearToCalendar(tm.Year), tm.Month, tm.Day, 
-          tm.Hour, tm.Minute, tm.Second);
-  Serial.println(timeStr);
-}
-
-// GPS時刻の状態を確認
-void checkGPSTime() {
-  if (gps.time.isValid() && gps.date.isValid()) {
-    char gpsTimeStr[30];
-    // GPS時刻はUTCなので、JST(+9時間)に変換
-    int hour = gps.time.hour() + 9;
-    int day = gps.date.day();
-    int month = gps.date.month();
-    int year = gps.date.year();
-    
-    // 日付の調整
-    if (hour >= 24) {
-      hour -= 24;
-      day++;
-    }
-    
-    sprintf(gpsTimeStr, "GPS Time(JST): %04d/%02d/%02d %02d:%02d:%02d", 
-            year, month, day, hour,
-            gps.time.minute(), gps.time.second());
-    Serial.println(gpsTimeStr);
-  } else {
-    Serial.println("GPS time not yet valid");
-  }
-}
-
-// 同期状態の表示
-void printSyncStatus() {
-  Serial.print("Sync Status: ");
-  if (gpsTimeSet) {
-    unsigned long timeSinceSync = (millis() - lastTimeSync) / 1000; // 秒に変換
-    Serial.print("Last sync ");
-    Serial.print(timeSinceSync);
-    Serial.println(" seconds ago");
-  } else {
-    Serial.println("Not yet synchronized with GPS");
-  }
-}
-//============================================================
-// 設定関連の関数
-
-// 設定をSDカードから読み込む
-void loadConfig() {
-  File configFile = SD.open("config.txt");
-  if (configFile) {
-    String line;
-    while (configFile.available()) {
-      line = configFile.readStringUntil('\n');
-      int separator = line.indexOf(':');
-      if (separator != -1) {
-        String key = line.substring(0, separator);
-        uint32_t value = line.substring(separator + 1).toInt() * 1000;
-        
-        if (key == "SUP_START") config.sup_start_time = value;
-        else if (key == "SUP_STOP") config.sup_stop_time = value;
-        else if (key == "EXH_START") config.exh_start_time = value;
-        else if (key == "EXH_STOP") config.exh_stop_time = value;
-      }
-    }
-    configFile.close();
-  }
-}
-
-// 設定をSDカードに保存
-void saveConfig() {
-  File configFile = SD.open("config.txt", FILE_WRITE);
-  if (configFile) {
-    configFile.println("SUP_START:" + String(config.sup_start_time / 1000));
-    configFile.println("SUP_STOP:" + String(config.sup_stop_time / 1000));
-    configFile.println("EXH_START:" + String(config.exh_start_time / 1000));
-    configFile.println("EXH_STOP:" + String(config.exh_stop_time / 1000));
-    configFile.close();
-  }
-}
-
-// シリアルコマンドの処理
-void handleSerialCommand() {
-  if (Serial.available() > 0) {
-    String command = Serial.readStringUntil('\n');
-    Serial.println("Received command: " + command);
-    
-    int separator = command.indexOf(':');
-    if (separator != -1) {
-      String cmd = command.substring(0, separator);
-      uint32_t value = command.substring(separator + 1).toInt() * 1000;
-      
-      Serial.println("Command: " + cmd);
-      Serial.println("Value: " + String(value));
-      
-      if (cmd == "SUP_START") {
-        config.sup_start_time = value;
-        Serial.println("SUP_START set to: " + String(value / 1000) + "s");
-      }
-      else if (cmd == "EXH_START") {
-        config.exh_start_time = value;
-        Serial.println("EXH_START set to: " + String(value / 1000) + "s");
-      }
-      
-      Serial.println("Current settings:");
-      Serial.println("SUP_START_TIME: " + String(config.sup_start_time / 1000) + "s");
-      Serial.println("EXH_START_TIME: " + String(config.exh_start_time / 1000) + "s");
-    }
-  }
-}
-
-//============================================================
-// setup
-
-void setup() {
-  Serial.begin(9600);
-  Serial.println("System starting...");
-
-  //SDカードシールド
-  pinMode(SS, OUTPUT);
-  if (!SD.begin(chipSelect)) {
-    Serial.println("Card failed, or not present");
-    return;
-  }
-  Serial.println("SD ok");
-
-  // 設定の読み込み
-  loadConfig();
-
-  //GPS初期化
-  mygps.begin(9600);
-  Serial.println("GPS initialized");
-  
-  // RTCに初期時刻を設定
-  rtc.setDateTime(2024, 1, 1, 0, 0, 0);  // 2024/01/01 00:00:00
-  Serial.println("RTC initialized with default time: 2024/01/01 00:00:00");
-
-  Wire.begin();
-
-  //水圧センサ
-  while (!DepthSensor.init()) {
-    Serial.println("Init failed!");
-    Serial.println("Are SDA/SCL connected correctly?");
-    Serial.println("Blue Robotics Bar30: White=SDA, Green=SCL");
-    delay(5000);
-  }
-  DepthSensor.setModel(MS5837::MS5837_30BA);  //センサ型番を設定
-  DepthSensor.setFluidDensity(997);           //流体密度(kg/m^3)
-
-  pinMode(valve0, OUTPUT);
-  pinMode(valve1, OUTPUT);
-  pinMode(valve2, OUTPUT);
-  pinMode(GREEN, OUTPUT);
-  pinMode(RED, OUTPUT);
-
-  last_ctrl = millis();
-  Serial.println("Setup Done");
-}
-
-//============================================================
-// loop
-
-void loop() {
-  // 時刻表示の更新
-  if (millis() - lastTimePrint > TIME_PRINT_INTERVAL) {
-    printCurrentTime();
-    checkGPSTime();
-    printSyncStatus();
-    Serial.println("------------------------");
-    lastTimePrint = millis();
-  }
-
-  // GPS時刻の初回設定
-  if (!gpsTimeSet) {
-    if (gps.time.isValid() && gps.date.isValid()) {
-      correctTime();
-      gpsTimeSet = true;
-      lastTimeSync = millis();
-      Serial.println("Initial GPS time sync completed");
-    }
-  }
-  // 定期的な同期
-  else if (millis() - lastTimeSync > TIME_SYNC_INTERVAL) {
-    if (gps.time.isValid() && gps.date.isValid()) {
-      correctTime();
-      lastTimeSync = millis();
-      Serial.println("RTC re-synchronized with GPS time");
-    }
-  }
-
-  // シリアルコマンドの確認
-  handleSerialCommand();
-
-  // GPSデータが利用可能な場合に処理を実行
-  while (mygps.available()) {
-    gps.encode(mygps.read());
-  }
-
-  // センサーデータの取得と処理
-  acquireSensorData();
-  if (((in_prs_pressure * 68.94) + 1013.25) < out_pre_pressure) {
-    digitalWrite(valve2, HIGH);
-    V2 = 1;
-    isControling = 1;
-    delay(100);
-  } else {
-    digitalWrite(valve2, LOW);
-    V2 = 0;
-  }
-
-  // バルブ制御
-  CtrlValve();
-
-  // SDカードにデータを書き込む
-  if (isControling) {
-    writeSDcard_CTRL();
-    isControling = 0;
-    state = 0;
-  }
-  writeSDcard();
-}
+void CtrlValve();
+void acquireSensorData();
+void getTemperatureData();
+void getGPSData();
+bool isLeapYear(int year);
+void correctTime();
+void writeSDcard();
+void writeSDcard_CTRL();
 
 //============================================================
 // 各種関数
@@ -366,18 +140,8 @@ void loop() {
 //------------------------------------------------------------
 // データ取得系
 
-// センサデータ取得
+// 基本センサデータ取得（OneWire以外）
 void acquireSensorData() {
-  // GPSデータの取得
-  fetchGPSData();
-
-  //RTCデータの取得
-  fetchRTCData();
-
-  // 温度センサデータの取得(必要に応じてエラーハンドリング追加)
-  sensors.requestTemperatures();
-  temperature = sensors.getTempCByIndex(0);
-
   // 水圧センサデータの取得
   DepthSensor.read();
   out_pre_pressure = DepthSensor.pressure();
@@ -390,84 +154,146 @@ void acquireSensorData() {
   in_prs_pressure = in_prs_voltage / 4.5 * 30;  //PSI　mbarに変換する場合は68.94をかける
 }
 
-
-// GPSデータ取得
-void fetchGPSData() {
-  // GPSデータの取得
-  lat = String(gps.location.lat(), 6);
-  lng = String(gps.location.lng(), 6);
-  altitude = gps.altitude.meters();
-  gpssatellites = gps.satellites.value();
+// OneWire温度センサデータ取得
+void getTemperatureData() {
+  // OneWireを初期化
+  OneWire oneWire(ONE_WIRE_BUS);
+  DallasTemperature sensors(&oneWire);
+  sensors.begin();
+  
+  // 温度センサデータの取得
+  sensors.requestTemperatures();
+  temperature = sensors.getTempCByIndex(0);
 }
 
-// 閏年かどうかを判定する関数
+// GPSデータ取得
+void getGPSData() {
+  // GPSシリアルを開始
+  mygps.begin(9600);
+  
+  // GPSデータの取得（一定時間または有効なデータを受信するまで）
+  unsigned long startTime = millis();
+  bool timeUpdated = false;
+  
+  while ((millis() - startTime) < 1000) { // 1秒間データを読み取り
+    while (mygps.available()) {
+      if (gps.encode(mygps.read())) {
+        // 位置情報の更新
+        if (gps.location.isUpdated()) {
+          lat = String(gps.location.lat(), 6);
+          lng = String(gps.location.lng(), 6);
+          altitude = gps.altitude.meters();
+          gpssatellites = gps.satellites.value();
+        }
+        
+        // 時刻情報の更新
+        if (gps.time.isValid() && gps.date.isValid()) {
+          // RTCの時刻を補正
+          correctTime();
+          timeUpdated = true;
+        }
+      }
+    }
+    
+    // 時刻が更新されたら終了
+    if (timeUpdated) {
+      break;
+    }
+  }
+  
+  // デバッグ出力
+  Serial.print("GPS Time: ");
+  if (gps.time.isValid()) {
+    Serial.print(gps.time.hour());
+    Serial.print(":");
+    Serial.print(gps.time.minute());
+    Serial.print(":");
+    Serial.println(gps.time.second());
+  } else {
+    Serial.println("Invalid");
+  }
+  
+  // GPSシリアルを停止
+  mygps.end();
+}
+
+// 閏年判定
 bool isLeapYear(int year) {
   return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
 }
 
-// RTCデータ
-void fetchRTCData() {
-  miliTime = millis();
-  tmElements_t tm = rtc.read();
-  rtc_year = tmYearToCalendar(tm.Year);
-  rtc_month = tm.Month;
-  rtc_day = tm.Day;
-  rtc_hour = tm.Hour;
-  rtc_minute = tm.Minute;
-  rtc_second = tm.Second;
-}
-
 //RTCの時刻をGPSで補正
 void correctTime() {
-  int daysInMonth[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-  while (1) {
-    while (mygps.available()) {
-      gps.encode(mygps.read());  //GPSから取得したデータをエンコード
+  miliTime = millis();
+  
+  if (gps.time.isValid() && gps.date.isValid()) {
+    //時刻の修正（UTC -> JST）
+    int gps_year = gps.date.year();
+    int gps_month = gps.date.month();
+    int gps_day = gps.date.day();
+    int gps_hour = gps.time.hour() + 9;  // UTC+9
+    int gps_minute = gps.time.minute();
+    int gps_second = gps.time.second();
+
+    // デバッグ出力
+    Serial.print("GPS DateTime: ");
+    Serial.print(gps_year);
+    Serial.print("/");
+    Serial.print(gps_month);
+    Serial.print("/");
+    Serial.print(gps_day);
+    Serial.print(" ");
+    Serial.print(gps_hour);
+    Serial.print(":");
+    Serial.print(gps_minute);
+    Serial.print(":");
+    Serial.println(gps_second);
+
+    //時刻が24を超える場合の処理
+    if (gps_hour >= 24) {
+      gps_hour -= 24;
+      gps_day += 1;
     }
-    fetchRTCData();
 
-    if (gps.time.isUpdated()) {
-
-      if (gps.location.isUpdated()) {
-        //時刻の修正（UTC -> JST）
-        int gps_year = gps.date.year();
-        int gps_month = gps.date.month();
-        int gps_day = gps.date.day();
-        int gps_hour = gps.time.hour() + 9;
-        int gps_munute = gps.time.minute();
-        int gps_second = gps.time.second();
-
-        //時刻が24を超える場合の処理
-        if (gps_hour >= 24) {
-          gps_hour -= 24;
-          gps_day += 1;
-        }
-
-        //月の日数を考慮して日付を修正
-        if (gps_day > daysInMonth[gps_month - 1]) {
-          if (!(gps_month == 2 && gps_day == 29 && isLeapYear(gps_year))) {
-            gps_day = 1;
-            gps_month += 1;
-          }
-        }
-
-        //月が12を超える場合の処理
-        if (gps_month > 12) {
-          gps_month = 1;
-          gps_year += 1;
-        }
-
-        //GPSから取得した時刻をRTCに適用して時間を合わせる
-        rtc.setDateTime(gps_year, gps_month, gps_day, gps_hour, gps_munute, gps_second);
-        tmElements_t tm = rtc.read();
-        Serial.print("RTCに設定した時刻:");
-        char s[20];
-        sprintf(s, "%d/%d/%d %d:%d:%d", tmYearToCalendar(tm.Year), tm.Month, tm.Day, tm.Hour, tm.Minute, tm.Second);
-        Serial.println(s);
-        Serial.println("RTC set comp");
-        break;
+    //月の日数を考慮して日付を修正
+    if (gps_day > daysInMonth[gps_month - 1]) {
+      if (!(gps_month == 2 && gps_day == 29 && isLeapYear(gps_year))) {
+        gps_day = 1;
+        gps_month += 1;
       }
     }
+
+    //月が12を超える場合の処理
+    if (gps_month > 12) {
+      gps_month = 1;
+      gps_year += 1;
+    }
+
+    //GPSから取得した時刻をRTCに適用
+    rtc.setDateTime(gps_year, gps_month, gps_day, gps_hour, gps_minute, gps_second);
+    
+    // RTCから読み取って確認
+    tmElements_t tm = rtc.read();
+    rtc_year = tmYearToCalendar(tm.Year);
+    rtc_month = tm.Month;
+    rtc_day = tm.Day;
+    rtc_hour = tm.Hour;
+    rtc_minute = tm.Minute;
+    rtc_second = tm.Second;
+    
+    // デバッグ出力
+    Serial.print("RTC Set: ");
+    Serial.print(rtc_year);
+    Serial.print("/");
+    Serial.print(rtc_month);
+    Serial.print("/");
+    Serial.print(rtc_day);
+    Serial.print(" ");
+    Serial.print(rtc_hour);
+    Serial.print(":");
+    Serial.print(rtc_minute);
+    Serial.print(":");
+    Serial.println(rtc_second);
   }
 }
 
@@ -475,7 +301,6 @@ void correctTime() {
 void writeSDcard() {
   String Sensorlog = "";
   Sensorlog += miliTime;
-
   Sensorlog += ",";
   Sensorlog += rtc_year;
   Sensorlog += "/";
@@ -619,5 +444,172 @@ void writeSDcard_CTRL() {
     digitalWrite(GREEN, LOW);
     digitalWrite(RED, HIGH);
     delay(2000);
+  }
+}
+
+//============================================================
+// setup
+
+void setup() {
+  Serial.begin(9600);
+  while (!Serial) {
+    ;
+  }
+    
+  Serial.println("GPS Console Complete!");
+  
+  //SDカードシールド
+  pinMode(SS, OUTPUT);
+  if (!SD.begin(chipSelect)) {
+    Serial.println("Card failed, or not present");
+    return;
+  }
+  Serial.println("SD ok");
+
+  // 設定の読み込み
+  loadConfig();
+
+  Wire.begin();
+
+  //水圧センサ
+  while (!DepthSensor.init()) {
+    Serial.println("Init failed!");
+    Serial.println("Are SDA/SCL connected correctly?");
+    Serial.println("Blue Robotics Bar30: White=SDA, Green=SCL");
+    delay(5000);
+  }
+  DepthSensor.setModel(MS5837::MS5837_30BA);
+  DepthSensor.setFluidDensity(997);
+  //RTC
+  rtc.setDateTime(2024, 1, 27, 20, 27, 0);
+
+  pinMode(valve0, OUTPUT);
+  pinMode(valve1, OUTPUT);
+  pinMode(valve2, OUTPUT);
+  pinMode(GREEN, OUTPUT);
+  pinMode(RED, OUTPUT);
+
+  last_ctrl = millis();
+  Serial.println("Setup Done");
+}
+
+//============================================================
+// loop
+
+void loop() {
+  // シリアルコマンドの確認
+  handleSerialCommand();
+
+  // 現在時刻の更新
+  miliTime = millis();
+
+  // 基本センサデータの取得（温度センサ以外）
+  acquireSensorData();
+  
+  // 加圧制御
+  if (((in_prs_pressure * 68.94) + 1013.25) < out_pre_pressure) {
+    digitalWrite(valve2, HIGH);
+    V2 = 1;
+    isControling = 1;
+    delay(100);
+  } else {
+    digitalWrite(valve2, LOW);
+    V2 = 0;
+  }
+
+  // OneWireを終了してGPSデータを取得
+  getGPSData();
+  
+  // GPS取得後に温度センサデータを取得
+  getTemperatureData();
+
+  // バルブ制御
+  CtrlValve();
+
+  // データ記録
+  if (isControling == true) {
+    writeSDcard_CTRL();
+    isControling = 0;
+    state = 0;
+  }
+  writeSDcard();
+}
+
+//============================================================
+// 設定関連の関数
+
+// 設定をSDカードから読み込む
+void loadConfig() {
+  File configFile = SD.open("config.txt");
+  if (configFile) {
+    String line;
+    while (configFile.available()) {
+      line = configFile.readStringUntil('\n');
+      int separator = line.indexOf(':');
+      if (separator != -1) {
+        String key = line.substring(0, separator);
+        uint32_t value = line.substring(separator + 1).toInt() * 1000; // 秒からミリ秒に変換
+        
+        if (key == "SUP_START") config.sup_start_time = value;
+        else if (key == "SUP_STOP") config.sup_stop_time = value;
+        else if (key == "EXH_START") config.exh_start_time = value;
+        else if (key == "EXH_STOP") config.exh_stop_time = value;
+      }
+    }
+    configFile.close();
+  }
+}
+
+// 設定をSDカードに保存
+void saveConfig() {
+  File configFile = SD.open("config.txt", FILE_WRITE);
+  if (configFile) {
+    configFile.println("SUP_START:" + String(config.sup_start_time / 1000));
+    configFile.println("SUP_STOP:" + String(config.sup_stop_time / 1000));
+    configFile.println("EXH_START:" + String(config.exh_start_time / 1000));
+    configFile.println("EXH_STOP:" + String(config.exh_stop_time / 1000));
+    configFile.close();
+  }
+}
+
+// シリアルコマンドの処理
+void handleSerialCommand() {
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    Serial.println("Received command: " + command);
+    
+    int separator = command.indexOf(':');
+    if (separator != -1) {
+      String cmd = command.substring(0, separator);
+      uint32_t value = command.substring(separator + 1).toInt() * 1000;
+      
+      Serial.println("Command: " + cmd);
+      Serial.println("Value: " + String(value));
+      
+      if (cmd == "SUP_START") {
+        config.sup_start_time = value;
+        Serial.println("SUP_START set to: " + String(value / 1000) + "s");
+      }
+      else if (cmd == "SUP_STOP") {
+        config.sup_stop_time = value;
+        Serial.println("SUP_STOP set to: " + String(value / 1000) + "s");
+      }
+      else if (cmd == "EXH_START") {
+        config.exh_start_time = value;
+        Serial.println("EXH_START set to: " + String(value / 1000) + "s");
+      }
+      else if (cmd == "EXH_STOP") {
+        config.exh_stop_time = value;
+        Serial.println("EXH_STOP set to: " + String(value / 1000) + "s");
+      }
+      
+      Serial.println("Current settings:");
+      Serial.println("SUP_START_TIME: " + String(config.sup_start_time / 1000) + "s");
+      Serial.println("SUP_STOP_TIME: " + String(config.sup_stop_time / 1000) + "s");
+      Serial.println("EXH_START_TIME: " + String(config.exh_start_time / 1000) + "s");
+      Serial.println("EXH_STOP_TIME: " + String(config.exh_stop_time / 1000) + "s");
+      
+      saveConfig();
+    }
   }
 }
