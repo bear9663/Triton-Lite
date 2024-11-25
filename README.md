@@ -15,3 +15,7 @@ Time(https://github.com/PaulStoffregen/Time)
 Python
 tkinter
 pyserial
+
+
+
+https://www.waveshare.com/wiki/L76K_GPS_Module#Resource
