@@ -1,11 +1,12 @@
 /**
  *
  * 20240729:圧力センサの値を求めるプログラムがおかしかったため修正
- *20241124:OneWireendを追加し、GPSの取得失敗するのを修正
+ *
+ *
  * @file TritonLite_main.ino * 
  * @brief Triton-Lite用のプログラム
- * @author Komatsu Takuma
- * @date 2024/1/25
+ * @author Ryusei Kamiyama , Shintaro Matsumoto
+ * @date 2024/01/27
  */
 
 //============================================================
@@ -444,6 +445,7 @@ void writeSDcard_CTRL() {
     digitalWrite(GREEN, LOW);
     digitalWrite(RED, HIGH);
     delay(2000);
+    digitalWrite(RED, LOW);
   }
 }
 
