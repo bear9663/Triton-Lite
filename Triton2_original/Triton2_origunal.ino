@@ -1,11 +1,12 @@
 /**
  *
  * 20240729:圧力センサの値を求めるプログラムがおかしかったため修正
- *20241124:OneWireendを追加し、GPSの取得失敗するのを修正
+ *
+ *
  * @file TritonLite_main.ino * 
  * @brief Triton-Lite用のプログラム
  * @author Komatsu Takuma
- * @date 2024/1/25
+ * @date 2024/12/24
  */
 
 //============================================================
@@ -54,7 +55,7 @@ struct SystemConfig {
 const int chipSelect = 10;
 
 //GPS
-SoftwareSerial mygps(3, 2);  // RX=3ピン, TX=2ピン
+SoftwareSerial mygps(3, 2);  // RX=2ピン, TX=3ピン秋月とスイッチサイエンスで逆
 TinyGPSPlus gps;
 
 //温度センサ
@@ -132,7 +133,7 @@ void getGPSData();
 bool isLeapYear(int year);
 void correctTime();
 void writeSDcard();
-void writeSDcard_CTRL();
+//void writeSDcard_CTRL();
 
 //============================================================
 // 各種関数
@@ -281,7 +282,7 @@ void correctTime() {
     rtc_minute = tm.Minute;
     rtc_second = tm.Second;
     
-    // デバッグ出力
+    // デバッグ出力G
     Serial.print("RTC Set: ");
     Serial.print(rtc_year);
     Serial.print("/");
@@ -296,7 +297,6 @@ void correctTime() {
     Serial.println(rtc_second);
   }
 }
-
 // センサデータ書き込み
 void writeSDcard() {
   String Sensorlog = "";
@@ -398,7 +398,8 @@ void CtrlValve() {
 }
 
 // 電磁弁状況書き込み
-void writeSDcard_CTRL() {
+
+/* void writeSDcard_CTRL() {
   String CTRLlog = "";
   CTRLlog += miliTime;
   CTRLlog += ",";
@@ -446,7 +447,7 @@ void writeSDcard_CTRL() {
     delay(2000);
   }
 }
-
+*/
 //============================================================
 // setup
 
@@ -528,7 +529,7 @@ void loop() {
 
   // データ記録
   if (isControling == true) {
-    writeSDcard_CTRL();
+   // writeSDcard_CTRL();
     isControling = 0;
     state = 0;
   }
